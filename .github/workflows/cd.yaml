@@ -1,0 +1,77 @@
+name: CD Pipeline
+
+on:
+  workflow_run: # Changed trigger to workflow_run
+    workflows: ["CI Pipeline"] # Specify the name of your CI workflow
+    types:
+      - completed # Trigger when the CI workflow completes
+    branches:
+      - main # Only run if the CI workflow was on the main branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Deploy to GCP VM
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.GCP_HOST }}
+          username: ${{ secrets.GCP_USER }}
+          key: ${{ secrets.GCP_SSH_KEY }}
+          script: |
+            export PATH="$PATH:/home/${{ secrets.GCP_USER }}/bin"
+            mkdir -p /home/${{ secrets.GCP_USER }}/niftyfifty
+            cd /home/${{ secrets.GCP_USER }}/niftyfifty
+
+            # Pull latest repo code (optional if using Docker pull)
+            if [ -d ".git" ]; then
+              git reset --hard
+              git pull origin main
+            else
+              git clone https://github.com/muralimittireddy/niftyfifty.git .
+            fi  
+
+            
+
+            # Create the production .env file
+            cat > .env <<EOL
+            DB_NAME=${{ vars.DB_NAME }}
+            DB_USER=${{ vars.DB_USER }}
+            DB_PASSWORD=${{ vars.DB_PASSWORD }}
+            DATABASE_URL=postgresql://${{ vars.DB_USER }}:${{ vars.DB_PASSWORD }}@db:5432/${{ vars.DB_NAME }}
+            NSE_NIFTY50_URL=${{ vars.NSE_NIFTY50_URL}}
+            NSE_BASE_URL=${{ vars.NSE_BASE_URL}}
+            MAIL_USERNAME=${{ secrets.MAIL_USERNAME}}
+            MAIL_PASSWORD=${{secrets.MAIL_PASSWORD}}
+            MAIL_TO_ADDRESS=${{secrets.MAIL_TO_ADDRESS}}
+            MAIL_CC_ADDRESS=${{secrets.MAIL_CC_ADDRESS}}
+
+            DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
+            GCP_HOST=${{secrets.GCP_HOST}}
+            
+            EOL
+
+            
+
+            docker build -t ${{ secrets.DOCKER_HUB_USERNAME }}/niftyfifty:latest .
+            docker push ${{ secrets.DOCKER_HUB_USERNAME }}/niftyfifty:latest
+
+
+            cd /home/${{ secrets.GCP_USER }}/niftyfifty
+
+            # ✅ Log in to Docker Hub (required for private OR rate-limited pulls)
+            echo "${{ secrets.DOCKER_HUB_TOKEN }}" | docker login --username ${{ secrets.DOCKER_HUB_USERNAME }} --password-stdin
+
+            # ✅ Export DOCKER_HUB_USERNAME so compose can substitute it #
+            export DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
+
+            # Stop old containers and pull fresh images
+            docker-compose -f docker-compose.prod.yaml down
+            docker-compose -f docker-compose.prod.yaml pull
+
+            # Start new containers
+            docker-compose -f docker-compose.prod.yaml up -d
